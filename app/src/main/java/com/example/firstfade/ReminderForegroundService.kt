@@ -16,6 +16,8 @@ import android.os.Looper
 import android.app.KeyguardManager
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import android.app.usage.UsageStatsManager
+import android.app.AppOpsManager
 import com.example.firstfade.MainActivity
 
 class ReminderForegroundService : Service() {
@@ -32,11 +34,13 @@ class ReminderForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(ONGOING_NOTIFICATION_ID, buildOngoingNotification())
         initializeTodayIfNeeded()
+        backfillFromUsageStatsIfNeeded()
         registerScreenReceivers()
         prefs().edit().putBoolean(KEY_SERVICE_RUNNING, true).apply()
         // 현재 상태가 이미 잠금 해제라면 세션 시작 및 다음 임계 알림 예약
         if (isDeviceUnlockedAndInteractive()) {
             startSessionIfNotStarted()
+            alignNextThresholdToInterval()
             scheduleNextThreshold()
         } else {
             endSessionIfStarted()
@@ -143,7 +147,7 @@ class ReminderForegroundService : Service() {
                 .putString("day", today)
                 .putLong("accum_ms", 0L)
                 .putLong("session_start", -1L)
-                .putInt("next_threshold_min", 1)
+                .putInt("next_threshold_seconds", getIntervalSeconds())
                 .apply()
         }
     }
@@ -220,15 +224,16 @@ class ReminderForegroundService : Service() {
         val now = System.currentTimeMillis()
         val totalMs = if (sessionStart >= 0) accum + (now - sessionStart) else accum
         val totalMin = (totalMs / 60000L).toInt()
-        var nextThreshold = p.getInt("next_threshold_min", 1)
+        var nextThreshold = p.getInt("next_threshold_seconds", getIntervalSeconds())
         var notified = false
-        while (totalMin >= nextThreshold) {
-            showUsageNotification(totalMin)
-            nextThreshold += 1
+        val totalSeconds = (totalMs / 1000L).toInt()
+        while (totalSeconds >= nextThreshold) {
+            showUsageNotification(totalSeconds / 60)
+            nextThreshold += getIntervalSeconds()
             notified = true
         }
         if (notified) {
-            p.edit().putInt("next_threshold_min", nextThreshold).apply()
+            p.edit().putInt("next_threshold_seconds", nextThreshold).apply()
         }
     }
 
@@ -236,14 +241,83 @@ class ReminderForegroundService : Service() {
         handler.removeCallbacks(thresholdRunnable)
         val p = prefs()
         val sessionStart = p.getLong("session_start", -1L)
-        if (sessionStart < 0) return // not unlocked -> no scheduling
+        if (sessionStart < 0) return
         val accum = p.getLong("accum_ms", 0L)
-        val nextThresholdMin = p.getInt("next_threshold_min", 1)
+        val nextThresholdSec = p.getInt("next_threshold_seconds", getIntervalSeconds())
         val now = System.currentTimeMillis()
-        val elapsedMs = accum + (now - sessionStart)
-        val targetMs = nextThresholdMin * 60_000L
-        val delay = (targetMs - elapsedMs).coerceAtLeast(1L)
-        handler.postDelayed(thresholdRunnable, delay)
+        val totalSeconds = ((accum + (now - sessionStart)) / 1000L).toInt()
+        val remainingSec = (nextThresholdSec - totalSeconds).coerceAtLeast(1)
+        handler.postDelayed(thresholdRunnable, remainingSec * 1000L)
+    }
+
+    private fun getIntervalSeconds(): Int {
+        val p = prefs()
+        return p.getInt("interval_seconds", 60)
+    }
+
+    private fun alignNextThresholdToInterval() {
+        val p = prefs()
+        val interval = getIntervalSeconds()
+        val sessionStart = p.getLong("session_start", -1L)
+        val accum = p.getLong("accum_ms", 0L)
+        val now = System.currentTimeMillis()
+        val totalSeconds = if (sessionStart >= 0) ((accum + (now - sessionStart)) / 1000L).toInt() else (accum / 1000L).toInt()
+        val currentNext = p.getInt("next_threshold_seconds", interval)
+        val alignedNext = if (totalSeconds < currentNext && currentNext % interval == 0) {
+            currentNext
+        } else {
+            val k = (totalSeconds / interval) + 1
+            k * interval
+        }
+        p.edit().putInt("next_threshold_seconds", alignedNext).apply()
+    }
+
+    private fun backfillFromUsageStatsIfNeeded() {
+        // 이미 누적값이 있거나 세션이 진행 중이면 패스
+        val p = prefs()
+        val hasAccum = p.getLong("accum_ms", 0L) > 0L || p.getLong("session_start", -1L) > 0L
+        if (hasAccum) return
+
+        // 권한 확인
+        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.checkOpNoThrow("android:get_usage_stats", android.os.Process.myUid(), packageName)
+        if (mode != AppOpsManager.MODE_ALLOWED) return
+
+        val usm = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        val start = cal.timeInMillis
+        val end = System.currentTimeMillis()
+        val events = usm.queryEvents(start, end)
+        var lastInteractiveStart = -1L
+        var accum = 0L
+        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        val keyguard = getSystemService(KEYGUARD_SERVICE) as android.app.KeyguardManager
+
+        val event = android.app.usage.UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            if (event.eventType == android.app.usage.UsageEvents.Event.SCREEN_INTERACTIVE) {
+                lastInteractiveStart = event.timeStamp
+            } else if (event.eventType == android.app.usage.UsageEvents.Event.SCREEN_NON_INTERACTIVE) {
+                if (lastInteractiveStart > 0) {
+                    accum += (event.timeStamp - lastInteractiveStart)
+                    lastInteractiveStart = -1L
+                }
+            }
+        }
+        // 현재도 인터랙티브라면 구간 마감 처리 없이 세션 시작으로 이어가게 함
+        val nowInteractive = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT_WATCH) pm.isInteractive else true
+        val nowUnlocked = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) !keyguard.isDeviceLocked else true
+        val now = System.currentTimeMillis()
+        p.edit()
+            .putLong("accum_ms", accum)
+            .putLong("session_start", if (nowInteractive && nowUnlocked) now else -1L)
+            .apply()
+        alignNextThresholdToInterval()
     }
 }
 

@@ -12,6 +12,11 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.provider.Settings
+import android.app.AppOpsManager
+import android.content.Context
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
@@ -59,6 +64,9 @@ class NotificationsFragment : Fragment() {
         // 사용시간 표시 시작
         updateUsageText()
         uiHandler.postDelayed(refreshRunnable, 1000L)
+        // 알림 간격 스피너 설정
+        setupIntervalSpinner()
+        updateCurrentIntervalText()
         return root
     }
 
@@ -77,6 +85,11 @@ class NotificationsFragment : Fragment() {
             }
         }
         val intent = Intent(requireContext(), ReminderForegroundService::class.java)
+        if (!hasUsageAccess()) {
+            // 사용 기록 접근 권한 요청 안내
+            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            return
+        }
         ContextCompat.startForegroundService(requireContext(), intent)
     }
 
@@ -112,6 +125,56 @@ class NotificationsFragment : Fragment() {
         val minutes = ((totalMs % 3_600_000L) / 60_000L).toInt()
         val seconds = ((totalMs % 60_000L) / 1000L).toInt()
         binding.usageTimeText.text = String.format("현재 사용시간: %02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    private fun setupIntervalSpinner() {
+        val labels = resources.getStringArray(com.example.firstfade.R.array.interval_labels)
+        val values = resources.getStringArray(com.example.firstfade.R.array.interval_values)
+        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, labels)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.intervalSpinner.adapter = adapter
+
+        val prefs = requireContext().getSharedPreferences("usage_prefs", android.content.Context.MODE_PRIVATE)
+        val savedSeconds = prefs.getInt("interval_seconds", 300)
+        val index = values.indexOf(savedSeconds.toString()).takeIf { it >= 0 } ?: 4
+        binding.intervalSpinner.setSelection(index)
+
+        binding.intervalSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
+                val seconds = values[position].toInt()
+                prefs.edit().putInt("interval_seconds", seconds).apply()
+                updateCurrentIntervalText()
+                if (isServiceRunning()) {
+                    // 서비스 재시작으로 새 간격 반영
+                    requireContext().stopService(Intent(requireContext(), ReminderForegroundService::class.java))
+                    ContextCompat.startForegroundService(requireContext(), Intent(requireContext(), ReminderForegroundService::class.java))
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>) {}
+        }
+    }
+
+    private fun hasUsageAccess(): Boolean {
+        val appOps = requireContext().getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.checkOpNoThrow("android:get_usage_stats", android.os.Process.myUid(), requireContext().packageName)
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun updateCurrentIntervalText() {
+        val prefs = requireContext().getSharedPreferences("usage_prefs", android.content.Context.MODE_PRIVATE)
+        val seconds = prefs.getInt("interval_seconds", 300)
+        val text = when (seconds) {
+            10 -> "현재 간격: 10초"
+            30 -> "현재 간격: 30초"
+            60 -> "현재 간격: 1분"
+            120 -> "현재 간격: 2분"
+            300 -> "현재 간격: 5분"
+            600 -> "현재 간격: 10분"
+            900 -> "현재 간격: 15분"
+            1800 -> "현재 간격: 30분"
+            else -> "현재 간격: ${seconds}초"
+        }
+        binding.currentIntervalText.text = text
     }
 
     private fun isDeviceUnlockedAndInteractive(): Boolean {
