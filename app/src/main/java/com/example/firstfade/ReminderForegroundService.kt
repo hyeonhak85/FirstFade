@@ -33,6 +33,7 @@ class ReminderForegroundService : Service() {
         startForeground(ONGOING_NOTIFICATION_ID, buildOngoingNotification())
         initializeTodayIfNeeded()
         registerScreenReceivers()
+        prefs().edit().putBoolean(KEY_SERVICE_RUNNING, true).apply()
         // 현재 상태가 이미 잠금 해제라면 세션 시작 및 다음 임계 알림 예약
         if (isDeviceUnlockedAndInteractive()) {
             startSessionIfNotStarted()
@@ -47,6 +48,7 @@ class ReminderForegroundService : Service() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         unregisterScreenReceivers()
+        prefs().edit().putBoolean(KEY_SERVICE_RUNNING, false).apply()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -118,6 +120,7 @@ class ReminderForegroundService : Service() {
         private const val REMINDER_NOTIFICATION_ID = 2
         const val ACTION_DISMISS = "com.example.firstfade.action.DISMISS"
         const val EXTRA_NOTIFICATION_ID = "extra_notification_id"
+        const val KEY_SERVICE_RUNNING = "service_running"
     }
 
     // ====== Usage tracking logic ======
@@ -142,12 +145,6 @@ class ReminderForegroundService : Service() {
                 .putLong("session_start", -1L)
                 .putInt("next_threshold_min", 1)
                 .apply()
-        } else {
-            // 기존 설정이 5분 등으로 남아있다면 1분 단위로 교정
-            val cur = p.getInt("next_threshold_min", 1)
-            if (cur != 1) {
-                p.edit().putInt("next_threshold_min", 1).apply()
-            }
         }
     }
 
@@ -226,7 +223,7 @@ class ReminderForegroundService : Service() {
         var nextThreshold = p.getInt("next_threshold_min", 1)
         var notified = false
         while (totalMin >= nextThreshold) {
-            showUsageNotification(nextThreshold)
+            showUsageNotification(totalMin)
             nextThreshold += 1
             notified = true
         }
