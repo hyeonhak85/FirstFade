@@ -109,18 +109,11 @@ class NotificationsFragment : Fragment() {
 
     private fun updateUsageText() {
         val prefs = requireContext().getSharedPreferences("usage_prefs", android.content.Context.MODE_PRIVATE)
-        // 표시용 보정: 서비스가 실행 중이고 기기가 잠금해제/인터랙티브인데 세션이 없으면 시작 시간 기록
-        if (isServiceRunning() && isDeviceUnlockedAndInteractive()) {
-            val sessionStart = prefs.getLong("session_start", -1L)
-            if (sessionStart < 0) {
-                prefs.edit().putLong("session_start", System.currentTimeMillis()).apply()
-            }
-        }
         // 누적 계산: 서비스와 동일 로직
         val sessionStart = prefs.getLong("session_start", -1L)
         val accum = prefs.getLong("accum_ms", 0L)
         val now = System.currentTimeMillis()
-        val totalMs = if (sessionStart >= 0) accum + (now - sessionStart) else accum
+        val totalMs = kotlin.math.max(0L, if (sessionStart >= 0) accum + (now - sessionStart) else accum)
         val hours = (totalMs / 3_600_000L).toInt()
         val minutes = ((totalMs % 3_600_000L) / 60_000L).toInt()
         val seconds = ((totalMs % 60_000L) / 1000L).toInt()

@@ -41,6 +41,7 @@ class ReminderForegroundService : Service() {
         if (isDeviceUnlockedAndInteractive()) {
             startSessionIfNotStarted()
             alignNextThresholdToInterval()
+            ensureThresholdAndNotifyIfNeeded()
             scheduleNextThreshold()
         } else {
             endSessionIfStarted()
@@ -164,6 +165,8 @@ class ReminderForegroundService : Service() {
                 when (intent?.action) {
                     Intent.ACTION_USER_PRESENT -> {
                         startSessionIfNotStarted()
+                        alignNextThresholdToInterval()
+                        ensureThresholdAndNotifyIfNeeded()
                         scheduleNextThreshold()
                     }
                     Intent.ACTION_SCREEN_OFF -> {
@@ -294,8 +297,7 @@ class ReminderForegroundService : Service() {
         val events = usm.queryEvents(start, end)
         var lastInteractiveStart = -1L
         var accum = 0L
-        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-        val keyguard = getSystemService(KEYGUARD_SERVICE) as android.app.KeyguardManager
+        // Power/Keyguard are not needed for backfill-only scenario
 
         val event = android.app.usage.UsageEvents.Event()
         while (events.hasNextEvent()) {
@@ -309,15 +311,15 @@ class ReminderForegroundService : Service() {
                 }
             }
         }
-        // 현재도 인터랙티브라면 구간 마감 처리 없이 세션 시작으로 이어가게 함
-        val nowInteractive = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT_WATCH) pm.isInteractive else true
-        val nowUnlocked = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) !keyguard.isDeviceLocked else true
-        val now = System.currentTimeMillis()
+        val existingAccum = p.getLong("accum_ms", 0L)
+        val safeAccum = kotlin.math.max(existingAccum, accum)
         p.edit()
-            .putLong("accum_ms", accum)
-            .putLong("session_start", if (nowInteractive && nowUnlocked) now else -1L)
+            .putLong("accum_ms", safeAccum)
+            // 초기 백필 시에는 세션을 시작하지 않음. 실제 USER_PRESENT 수신 시에만 시작
+            .putLong("session_start", -1L)
             .apply()
         alignNextThresholdToInterval()
+        scheduleNextThreshold()
     }
 }
 

@@ -1,3 +1,6 @@
+rootProject.name = "FirstFade"
+include(":app")
+
 pluginManagement {
     repositories {
         google {
@@ -18,6 +21,3 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-
-rootProject.name = "FirstFade"
-include(":app")
